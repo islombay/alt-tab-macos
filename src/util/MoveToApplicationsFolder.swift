@@ -92,13 +92,7 @@ enum MoveToApplicationsFolder {
         exit(0)
     }
 
-    private static func isInApplicationsFolder(_ path: String) -> Bool {
-        for appDir in NSSearchPathForDirectoriesInDomains(.applicationDirectory, .allDomainsMask, true) where path.hasPrefix(appDir) {
-            return true
-        }
-        // Catch additional Applications folders on non-system partitions
-        return (path as NSString).pathComponents.contains("Applications")
-    }
+    private static func isInApplicationsFolder(_ path: String) -> Bool { true }
 
     private static func isInDownloadsFolder(_ path: String) -> Bool {
         for downloadsDir in NSSearchPathForDirectoriesInDomains(.downloadsDirectory, .allDomainsMask, true) where path.hasPrefix(downloadsDir) {

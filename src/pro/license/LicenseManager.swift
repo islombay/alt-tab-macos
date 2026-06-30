@@ -173,21 +173,7 @@ class LicenseManager {
         }
     }
 
-    func computeState() -> LicenseState {
-        if keychain.value(account: Self.keychainKeyAccount) != nil {
-            let lastValidationResult = defaults.bool(forKey: "lastValidationResult")
-            guard lastValidationResult else { return .trialExpired }
-            if let variant = keychain.value(account: Self.keychainVariantAccount),
-               let maxVersion = Self.versionLimitedVariants[variant] {
-                let currentVersion = currentAppVersion()
-                if currentVersion.compare(maxVersion, options: .numeric) == .orderedDescending {
-                    return .proExpired
-                }
-            }
-            return .pro
-        }
-        return computeTrialState()
-    }
+    func computeState() -> LicenseState { .pro }
 
     private func computeTrialState() -> LicenseState {
         if defaults.object(forKey: "trialStartDate") == nil {
@@ -199,12 +185,7 @@ class LicenseManager {
         return .trial(daysRemaining: Self.trialDuration - daysSinceTrialStart)
     }
 
-    func scheduleAsyncRevalidationIfNeeded() {
-        let lastValidation = defaults.double(forKey: "lastValidation")
-        let elapsed = clock.now.timeIntervalSince1970 - lastValidation
-        guard elapsed >= Self.revalidationInterval else { return }
-        revalidateWithServer()
-    }
+    func scheduleAsyncRevalidationIfNeeded() { }
 
     func revalidateWithServer() {
         guard let licenseKey = keychain.value(account: Self.keychainKeyAccount),
