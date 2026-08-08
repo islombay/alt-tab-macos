@@ -10,7 +10,6 @@ class Preferences {
             "focusWindowShortcut": defaultShortcut(returnKeyEquivalent()),
             "previousWindowShortcut": defaultShortcut("⇧"),
             "cancelShortcut": defaultShortcut("⎋"),
-            "lockSearchShortcut": defaultShortcut("Space"),
             "closeWindowShortcut": defaultShortcut("W"),
             "minDeminWindowShortcut": defaultShortcut("M"),
             "toggleFullscreenWindowShortcut": defaultShortcut("F"),
@@ -40,7 +39,7 @@ class Preferences {
             "updatePolicy": UpdatePolicyPreference.autoCheck.indexAsString,
             "crashPolicy": CrashPolicyPreference.ask.indexAsString,
             "hideThumbnails": "false",
-            "hideSpaceNumberLabels": "false",
+            "hideSpaceNumberLabels": "true",
             "hideStatusIcons": "false",
             "previewFocusedWindow": "false",
             "captureWindowsInBackground": "true",
@@ -80,7 +79,7 @@ class Preferences {
     // system preferences
     static var finderShowsQuitMenuItem: Bool { UserDefaults(suiteName: "com.apple.Finder")?.bool(forKey: "QuitMenuItem") ?? false }
     static let staticShortcutKeys = [
-        "focusWindowShortcut", "previousWindowShortcut", "cancelShortcut", "lockSearchShortcut", "closeWindowShortcut",
+        "focusWindowShortcut", "previousWindowShortcut", "cancelShortcut", "closeWindowShortcut",
         "minDeminWindowShortcut", "toggleFullscreenWindowShortcut", "quitAppShortcut", "hideShowAppShortcut", "searchShortcut",
     ]
     static var allShortcutPreferenceKeys: [String] {
@@ -97,7 +96,6 @@ class Preferences {
     static var focusWindowShortcut: Shortcut? { CachedUserDefaults.shortcut("focusWindowShortcut") }
     static var previousWindowShortcut: Shortcut? { CachedUserDefaults.shortcut("previousWindowShortcut") }
     static var cancelShortcut: Shortcut? { CachedUserDefaults.shortcut("cancelShortcut") }
-    static var lockSearchShortcut: Shortcut? { CachedUserDefaults.shortcut("lockSearchShortcut") }
     static var closeWindowShortcut: Shortcut? { CachedUserDefaults.shortcut("closeWindowShortcut") }
     static var minDeminWindowShortcut: Shortcut? { CachedUserDefaults.shortcut("minDeminWindowShortcut") }
     static var toggleFullscreenWindowShortcut: Shortcut? { CachedUserDefaults.shortcut("toggleFullscreenWindowShortcut") }
@@ -334,6 +332,20 @@ class Preferences {
     static func effectivePreviewSelectedWindow(_ index: Int) -> Bool {
         guard hasOverride("previewFocusedWindowOverride", index) else { return previewSelectedWindow }
         return CachedUserDefaults.bool(indexToName("previewFocusedWindowOverride", index))
+    }
+
+    /// captures aren't tied to a specific shortcut, so anything sized or routed for Preview
+    /// must consider every slot's effective setting
+    static var anyShortcutUsesPreview: Bool {
+        (0...maxShortcutCount).contains { effectivePreviewSelectedWindow($0) }
+    }
+
+    /// Whether any shortcut's effective settings display window captures at all: the Thumbnails style
+    /// (tile screenshots) and/or the Preview overlay (whose instant first frame upscales the stored
+    /// thumbnail). When neither is configured, stored images would never be shown, so all capture work
+    /// is skipped and no image RAM is held.
+    static var anyShortcutShowsWindowCaptures: Bool {
+        anyShortcutUsesPreview || (0...maxShortcutCount).contains { effectiveAppearanceStyle($0) == .thumbnails }
     }
 
     /// Which Screen-Recording-dependent features any shortcut's effective settings rely on: the
