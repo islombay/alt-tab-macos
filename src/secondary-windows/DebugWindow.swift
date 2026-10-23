@@ -2,8 +2,7 @@ import Cocoa
 
 class DebugWindow: NSPanel {
     static var shared: DebugWindow?
-    static var canBecomeKey_ = true
-    override var canBecomeKey: Bool { Self.canBecomeKey_ }
+    override var canBecomeKey: Bool { SecondaryWindows.canBecomeKey }
     private var scrollView: NSScrollView!
     private var textView: NSTextView!
     private var copyLogsButton: NSButton!
@@ -14,15 +13,15 @@ class DebugWindow: NSPanel {
     private var isPerformingAutoScroll = false
     private var entries = [(LogLevel, String)]()
     private var isListening = false
-    private var windowDiscriminatorCheckbox: NSButton!
-    private var filterWindowDiscriminator = false
+    private var windowAdmissionCheckbox: NSButton!
+    private var filterWindowAdmission = false
     private var inspectButton: NSButton!
     private var inspectColumns: NSStackView!
     private var inspectAppField: NSTextField!
     private var inspectCgField: NSTextField!
     private var inspectAxField: NSTextField!
-    private var inspectTimer: Timer?
-    private var inspectClickMonitor: Any?
+    private var inspectMonitors = [Any]()
+    private let inspectThrottler = Throttler(delayInMs: 100)
     private var isInspecting = false
     private static let logFont = NSFont.userFixedPitchFont(ofSize: 11)!
     private static let levels: [LogLevel] = [.debug, .info, .warning, .error]
@@ -40,9 +39,7 @@ class DebugWindow: NSPanel {
     }
 
     private func setupWindow() {
-        title = NSLocalizedString("Debug tools", comment: "")
-        hidesOnDeactivate = false
-        isReleasedWhenClosed = false
+        applySecondaryWindowChrome(NSLocalizedString("Debug tools", comment: ""), hiddenTitlebar: false)
         minSize = NSSize(width: 400, height: 300)
     }
 
@@ -86,17 +83,16 @@ class DebugWindow: NSPanel {
         filterControl = NSSegmentedControl(labels: ["Debug", "Info", "Warning", "Error"],
                                            trackingMode: .selectOne, target: nil, action: nil)
         filterControl.translatesAutoresizingMaskIntoConstraints = false
-        LabelAndControl.applySystemSelectedSegmentStyle(filterControl)
         filterControl.selectedSegment = 0
         filterControl.onAction = { [weak self] _ in self?.filterChanged() }
         for i in 0..<Self.levels.count {
             filterControl.setImage(Self.colorDot(Self.colorForLevel(Self.levels[i])), forSegment: i)
             filterControl.setImageScaling(.scaleProportionallyDown, forSegment: i)
         }
-        windowDiscriminatorCheckbox = NSButton(checkboxWithTitle: "Accepted/Rejected windows", target: nil, action: nil)
-        windowDiscriminatorCheckbox.translatesAutoresizingMaskIntoConstraints = false
-        windowDiscriminatorCheckbox.onAction = { [weak self] _ in self?.windowDiscriminatorFilterChanged() }
-        let filterRow = NSStackView(views: [filterLabel, filterControl, windowDiscriminatorCheckbox])
+        windowAdmissionCheckbox = NSButton(checkboxWithTitle: "Accepted/Rejected windows", target: nil, action: nil)
+        windowAdmissionCheckbox.translatesAutoresizingMaskIntoConstraints = false
+        windowAdmissionCheckbox.onAction = { [weak self] _ in self?.windowAdmissionFilterChanged() }
+        let filterRow = NSStackView(views: [filterLabel, filterControl, windowAdmissionCheckbox])
         filterRow.translatesAutoresizingMaskIntoConstraints = false
         filterRow.orientation = .horizontal
         filterRow.spacing = 8
@@ -130,10 +126,8 @@ class DebugWindow: NSPanel {
         copyLogsButton.bezelStyle = .rounded
         copyLogsButton.controlSize = .small
         copyLogsButton.font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
-        if #available(macOS 11.0, *) {
-            copyLogsButton.image = NSImage(systemSymbolName: "doc.on.doc", accessibilityDescription: nil)
-            copyLogsButton.imagePosition = .imageLeading
-        }
+        copyLogsButton.image = NSImage(systemSymbolName: "doc.on.doc", accessibilityDescription: nil)
+        copyLogsButton.imagePosition = .imageLeading
         copyLogsButton.onAction = { [weak self] _ in self?.copyAllLogs() }
         // Inspect group box
         let inspectBox = NSBox()
@@ -213,14 +207,14 @@ class DebugWindow: NSPanel {
         rebuildText()
     }
 
-    private func windowDiscriminatorFilterChanged() {
-        filterWindowDiscriminator = windowDiscriminatorCheckbox.state == .on
+    private func windowAdmissionFilterChanged() {
+        filterWindowAdmission = windowAdmissionCheckbox.state == .on
         rebuildText()
     }
 
     private func shouldShowEntry(_ level: LogLevel, _ message: String) -> Bool {
         level.rawValue >= selectedMinLevel.rawValue &&
-            (!filterWindowDiscriminator || message.contains("WindowDiscriminator.swift"))
+            (!filterWindowAdmission || message.contains("surface accepted") || message.contains("surface not admitted"))
     }
 
     private func attributedLine(_ text: String, _ level: LogLevel) -> NSAttributedString {
@@ -263,16 +257,12 @@ class DebugWindow: NSPanel {
         NSPasteboard.general.setString(text, forType: .string)
         // brief "Copied!" confirmation, like the copy buttons on code blocks
         copyLogsButton.title = "Copied!"
-        if #available(macOS 11.0, *) {
-            copyLogsButton.image = NSImage(systemSymbolName: "checkmark", accessibilityDescription: nil)
-        }
+        copyLogsButton.image = NSImage(systemSymbolName: "checkmark", accessibilityDescription: nil)
         copyFeedbackTimer?.invalidate()
         copyFeedbackTimer = Timer.scheduledTimer(withTimeInterval: 1.2, repeats: false) { [weak self] _ in
             guard let self else { return }
             self.copyLogsButton.title = "Copy all"
-            if #available(macOS 11.0, *) {
-                self.copyLogsButton.image = NSImage(systemSymbolName: "doc.on.doc", accessibilityDescription: nil)
-            }
+            self.copyLogsButton.image = NSImage(systemSymbolName: "doc.on.doc", accessibilityDescription: nil)
         }
     }
 
@@ -287,6 +277,7 @@ class DebugWindow: NSPanel {
         isPerformingAutoScroll = false
     }
 
+    // periphery:ignore:parameters notification - NotificationCenter selector signature
     @objc private func scrollViewDidScroll(_ notification: Notification) {
         guard !isPerformingAutoScroll,
               let documentView = scrollView.documentView else { return }
@@ -308,16 +299,14 @@ class DebugWindow: NSPanel {
         copyFeedbackTimer?.invalidate()
         copyFeedbackTimer = nil
         copyLogsButton.title = "Copy all"
-        if #available(macOS 11.0, *) {
-            copyLogsButton.image = NSImage(systemSymbolName: "doc.on.doc", accessibilityDescription: nil)
-        }
+        copyLogsButton.image = NSImage(systemSymbolName: "doc.on.doc", accessibilityDescription: nil)
         entries.removeAll()
         textView.textStorage?.setAttributedString(NSAttributedString())
         selectedMinLevel = .debug
         filterControl.selectedSegment = 0
         isAutoScrolling = true
-        filterWindowDiscriminator = false
-        windowDiscriminatorCheckbox.state = .off
+        filterWindowAdmission = false
+        windowAdmissionCheckbox.state = .off
         hideAppIfLastWindowIsClosed()
         super.close()
     }
@@ -329,24 +318,28 @@ class DebugWindow: NSPanel {
     private func startInspecting() {
         isInspecting = true
         inspectButton.title = "Stop inspecting"
-        inspectTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
-            self?.updateInspectData()
+        updateInspectData()
+        // Mouse moves, not a timer: nothing runs while the pointer rests. Global monitors see moves over other
+        // apps, the local one over AltTab's own windows.
+        let moved: (NSEvent) -> Void = { [weak self] _ in
+            self?.inspectThrottler.throttleOrProceed { [weak self] in
+                guard let self, isInspecting else { return }
+                updateInspectData()
+            }
         }
-        inspectClickMonitor = NSEvent.addGlobalMonitorForEvents(matching: .leftMouseDown) { [weak self] _ in
-            self?.stopInspecting()
-        }
+        inspectMonitors = [
+            NSEvent.addGlobalMonitorForEvents(matching: .mouseMoved, handler: moved),
+            NSEvent.addLocalMonitorForEvents(matching: .mouseMoved) { moved($0); return $0 },
+            NSEvent.addGlobalMonitorForEvents(matching: .leftMouseDown) { [weak self] _ in self?.stopInspecting() },
+        ].compactMap { $0 }
     }
 
     private func stopInspecting() {
         guard isInspecting else { return }
         isInspecting = false
         inspectButton.title = "Inspect window"
-        inspectTimer?.invalidate()
-        inspectTimer = nil
-        if let monitor = inspectClickMonitor {
-            NSEvent.removeMonitor(monitor)
-            inspectClickMonitor = nil
-        }
+        inspectMonitors.forEach(NSEvent.removeMonitor)
+        inspectMonitors.removeAll()
     }
 
     private func updateInspectData() {

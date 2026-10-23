@@ -1,4 +1,5 @@
 import ShortcutRecorder
+import Carbon.HIToolbox.Events
 
 class KeyboardEventsTestable {
     static var globalShortcutsIds: [String: Int] {
@@ -9,17 +10,46 @@ class KeyboardEventsTestable {
     }
 }
 
+/// After dismissal starts, a key still addressed to AltTab belongs to neither its closed switcher nor
+/// the target app. Let macOS deliver later keys to whichever window it actually focuses.
+enum DismissalInput {
+    private static var isDismissing = false
+
+    static func begin() { isDismissing = true }
+
+    static func cancel() { isDismissing = false }
+
+    static func discard(_ event: NSEvent) -> Bool {
+        guard isDismissing else { return false }
+        if let window = event.window, window !== TilesPanel.shared {
+            cancel()
+            return false
+        }
+        // The gate takes no focus, so AltTab can be the app receiving the Escape meant to close it.
+        if event.type == .keyDown && event.keyCode == kVK_Escape { Day15HardGatePopover.dismissOnEscape() }
+        Logger.debug { "discarded key during switcher dismissal" }
+        return true
+    }
+}
+
 @discardableResult
-func handleKeyboardEvent(_ globalId: Int?, _ shortcutState: ShortcutState?, _ keyCode: UInt32?, _ modifiers: NSEvent.ModifierFlags?, _ isARepeat: Bool, _ event: NSEvent? = nil) -> Bool {
+func handleKeyboardEvent(_ globalId: Int?, _ shortcutState: ShortcutState?, _ keyCode: UInt32?,
+                         _ modifiers: NSEvent.ModifierFlags?, _ isARepeat: Bool, _ event: NSEvent? = nil,
+                         _ recordedHoldRelease: Bool = false) -> Bool {
+    // The Escape absorption tap can consume the key before NSEvent dismissal monitors see it.
+    if keyCode == UInt32(kVK_Escape) { Day15HardGatePopover.dismissOnEscape() }
     if let event, shouldAbsorbSearchEditingKeyDown(event) {
         switch TilesView.handleSearchEditingKeyDown(event) {
         case .handled: return true
-        case .passToField: return false
+        case .passToField:
+            TilesView.giveTheFieldTheCaretNow()
+            return false
         case .passToShortcuts: break
         }
     }
     logKeyboardEvent(globalId, shortcutState, keyCode, modifiers, isARepeat)
-    let someShortcutTriggered = triggerMatchingShortcuts(globalId, shortcutState, keyCode, modifiers, isARepeat)
+    let someShortcutTriggered = triggerMatchingShortcuts(globalId, shortcutState, keyCode, modifiers,
+                                                          isARepeat, recordedHoldRelease)
     return someShortcutTriggered
 }
 
@@ -43,11 +73,12 @@ private func logKeyboardEvent(_ globalId: Int?, _ shortcutState: ShortcutState?,
 /// event to arrive is usually the next summon's key-down. Settle that stale session against the tile the
 /// user was looking at BEFORE this event's action can move it: settled after, `nextWindowShortcut` has
 /// already cycled, so the release commits one tile past what was asked and every alt-tab from then on
-/// ping-pongs against a window the user never picked (QA F-01). Run again after the loop, for a session this
+/// ping-pongs against a window the user never picked, seen live. Run again after the loop, for a session this
 /// very event opened with the modifier already back up.
-private func settleLostHoldRelease() {
+private func settleLostHoldRelease(_ recordedHoldRelease: Bool = false) {
     guard let session = SwitcherSession.current else { return }
-    ControlsTab.shortcuts[Preferences.indexToName("holdShortcut", session.shortcutIndex)]?.settleLostRelease()
+    ControlsTab.shortcuts[Preferences.indexToName("holdShortcut", session.shortcutIndex)]?
+        .settleLostRelease(recordedHoldRelease)
 }
 
 private func shouldAbsorbSearchEditingKeyDown(_ event: NSEvent?) -> Bool {
@@ -57,7 +88,9 @@ private func shouldAbsorbSearchEditingKeyDown(_ event: NSEvent?) -> Bool {
     return true
 }
 
-private func triggerMatchingShortcuts(_ globalId: Int?, _ shortcutState: ShortcutState?, _ keyCode: UInt32?, _ modifiers: NSEvent.ModifierFlags?, _ isARepeat: Bool) -> Bool {
+private func triggerMatchingShortcuts(_ globalId: Int?, _ shortcutState: ShortcutState?, _ keyCode: UInt32?,
+                                      _ modifiers: NSEvent.ModifierFlags?, _ isARepeat: Bool,
+                                      _ recordedHoldRelease: Bool) -> Bool {
     settleLostHoldRelease()
     var someShortcutTriggered = false
     for shortcut in ControlsTab.shortcuts.values {
@@ -70,7 +103,7 @@ private func triggerMatchingShortcuts(_ globalId: Int?, _ shortcutState: Shortcu
         }
         shortcut.stopRepeatIfUp()
     }
-    settleLostHoldRelease()
+    settleLostHoldRelease(recordedHoldRelease)
     // TODO if we manage to move all keyboard listening to the background thread, we'll have issues returning this boolean
     // this function uses many objects that are also used on the main-thread. It also executes the actions
     // we'll have to rework this whole approach. Today we rely on somewhat in-order events/actions

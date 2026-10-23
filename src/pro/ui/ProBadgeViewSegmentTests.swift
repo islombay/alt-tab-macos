@@ -154,10 +154,8 @@ final class ProBadgeViewSegmentTests: XCTestCase {
         let overlay = attachOverlay(on: control)
         // The initial contentTintColor should be the system color the provider returned, not
         // an RGB literal. We verify equality with the system token at attach time.
-        if #available(macOS 10.14, *) {
-            XCTAssertEqual(overlay.icon.contentTintColor, NSColor.controlTextColor,
-                "regression: initial icon tint must be `.controlTextColor` (a system token), not a hard-coded RGB — system tokens auto-resolve for every appearance state")
-        }
+        XCTAssertEqual(overlay.icon.contentTintColor, NSColor.controlTextColor,
+            "regression: initial icon tint must be `.controlTextColor` (a system token), not a hard-coded RGB — system tokens auto-resolve for every appearance state")
     }
 
     func testAttachDoesNotHardcodeLabelColor() {
@@ -176,10 +174,8 @@ final class ProBadgeViewSegmentTests: XCTestCase {
     func testIconIsTemplateImage() {
         let control = makeControl()
         let overlay = attachOverlay(on: control)
-        if #available(macOS 11.0, *) {
-            XCTAssertTrue(overlay.icon.image?.isTemplate ?? false,
-                "regression: SF Symbol must be template so `contentTintColor` is honored — sibling segments use AppKit's native rendering which forces monochrome internally, so our overlay must do the same or `sparkles`-style glyphs render with intrinsic colors and visually clash with the row")
-        }
+        XCTAssertTrue(overlay.icon.image?.isTemplate ?? false,
+            "regression: SF Symbol must be template so `contentTintColor` is honored — sibling segments use AppKit's native rendering which forces monochrome internally, so our overlay must do the same or `sparkles`-style glyphs render with intrinsic colors and visually clash with the row")
     }
 
     // MARK: - Selection sync
@@ -317,5 +313,27 @@ final class ProBadgeViewSegmentTests: XCTestCase {
         XCTAssertGreaterThan(resyncCount, 0,
             "regression: `ProBadgeView.viewDidMoveToWindow` must call `updateColors()` so a badge added to an already-key window resyncs its visual state — otherwise a selected badge built in a lazy pane stays in the gradient state `init` chose when `window` was nil")
         host.orderOut(nil)
+    }
+
+    // MARK: - Symbol spacing
+
+    func testSymbolSpacingWithRoomToSpare() {
+        let spacing = SegmentSymbol.spacing(glyphWidth: 15, labelWidth: 40, availableWidth: 105)
+        XCTAssertEqual(spacing.before, SegmentSymbol.margin)
+        XCTAssertEqual(spacing.after, SegmentSymbol.margin + SegmentSymbol.extraGap)
+    }
+
+    /// Arabic "Hold" (86.8pt beside a 15pt glyph in a 105pt segment) fit before the spacing existed;
+    /// it must not start truncating because of it.
+    func testSymbolSpacingNeverExceedsSlack() {
+        let spacing = SegmentSymbol.spacing(glyphWidth: 15, labelWidth: 86.8, availableWidth: 104.5)
+        XCTAssertLessThanOrEqual(15 + spacing.before + spacing.after + SegmentSymbol.appKitGap + 86.8, 104.5 + 0.001)
+        XCTAssertLessThanOrEqual(spacing.before, spacing.after)
+    }
+
+    func testSymbolSpacingIsZeroForLabelsThatAlreadyTruncate() {
+        let spacing = SegmentSymbol.spacing(glyphWidth: 15, labelWidth: 120, availableWidth: 105)
+        XCTAssertEqual(spacing.before, 0)
+        XCTAssertEqual(spacing.after, 0)
     }
 }

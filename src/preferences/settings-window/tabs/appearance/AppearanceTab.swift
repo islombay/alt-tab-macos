@@ -1,11 +1,5 @@
 import Cocoa
 
-/// An overlay view that lets clicks pass through to views behind it. Used for the Pro-lock ghost
-/// overlay on the `.auto` size segment so the underlying segmented control still receives the click.
-class NonHitTestingView: NSView {
-    override func hitTest(_ point: NSPoint) -> NSView? { nil }
-}
-
 struct ShowHideRowInfo {
     var rowId: String!
     var uncheckedImage: String!
@@ -19,6 +13,8 @@ struct ShowHideRowInfo {
 class IllustratedImageThemeView: ClickHoverImageView {
     override var acceptsFirstResponder: Bool { false }
     static let padding = CGFloat(4)
+    /// The settings artwork is drawn on a 320pt-wide canvas clipped to a 12pt corner.
+    private static let artworkCornerRatio = CGFloat(12) / 320
     /// Shown when the current Appearance style doesn't support a Show/Hide option (the illustration
     /// is for another style). Exposed so `CustomizeStyleSheet.searchableStrings` can reference it
     /// without re-`NSLocalizedString`-ing the same English text.
@@ -28,55 +24,31 @@ class IllustratedImageThemeView: ClickHoverImageView {
     var imageName: String!
     var isFocused: Bool = false
     private var placeholderLabel: NSTextField!
+    private var imageCornerRadius: CGFloat!
 
-    /// Loads an illustration from the bundle without going through `NSImage(named:)`'s global
-    /// named cache (which never releases). Pairs with `cacheMode = .never` so the per-image scaled
-    /// bitmap cache is also disabled. Lets ARC reclaim the bitmap when no view holds the image.
-    ///
-    /// The bundled file is deterministic, but the *load* isn't: the bundle lookup and the file open
-    /// both touch the filesystem and can fail transiently (Sparkle swapping the `.app` mid-update,
-    /// app-translocation I/O hiccups, file-descriptor exhaustion). A crash report (SIGTRAP on the
-    /// force-unwrap this used to feed) proved it happens in the wild, so we retry once: a one-off
-    /// blip resolves to the real image rather than nil.
-    static func loadIllustration(_ name: String) -> NSImage? {
-        guard let path = Bundle.main.path(forResource: "\(name)@2x", ofType: "heic") else {
-            Logger.error { "illustration missing from bundle: \(name)" }
-            return nil
-        }
-        for attempt in 1...2 {
-            if let image = NSImage(contentsOfFile: path) {
-                image.cacheMode = .never
-                return image
-            }
-            Logger.warning { "illustration load failed (attempt \(attempt)): \(name)" }
-        }
-        Logger.error { "illustration unavailable after retry: \(name)" }
-        return nil
+    static func artworkName(_ name: String) -> String {
+        "settings-" + name.replacingOccurrences(of: "_light", with: "")
+            .replacingOccurrences(of: "_dark", with: "").replacingOccurrences(of: "_", with: "-")
     }
 
     init(_ style: AppearanceStylePreference, _ width: CGFloat) {
-        // TODO: The appearance theme functionality has not been implemented yet.
-        // We will implement it later; for now, use the light theme.
         let theme = "light"
         let imageName = IllustratedImageThemeView.getConcatenatedImageName(style, theme)
-        // `loadIllustration` retries a transient miss, so it should virtually always return the real
-        // image. Still don't force-unwrap: a persistent failure must degrade to a blank tile, not
-        // crash the whole app when the user opens the Customize sheet (matches the other call sites,
-        // which assign the optional straight to `.image`).
-        let imageView = NSImageView()
-        imageView.image = IllustratedImageThemeView.loadIllustration(imageName)
+        let imageWidth = width - IllustratedImageThemeView.padding
+        let imageCornerRadius = imageWidth * Self.artworkCornerRatio
+        let imageView = LocalizedIllustrationView(Self.artworkName(imageName))
         imageView.translatesAutoresizingMaskIntoConstraints = false
         imageView.imageScaling = .scaleProportionallyUpOrDown
         imageView.wantsLayer = true
         imageView.layer!.masksToBounds = true
-        imageView.layer!.cornerRadius = TableGroupView.cornerRadius
+        imageView.layer!.cornerRadius = imageCornerRadius
         super.init(infoCircle: imageView)
         self.style = style
         self.theme = theme
         self.imageName = imageName
+        self.imageCornerRadius = imageCornerRadius
         translatesAutoresizingMaskIntoConstraints = false
         wantsLayer = true
-        let imageWidth = width - IllustratedImageThemeView.padding
         let imageHeight = imageWidth / 1.6
         NSLayoutConstraint.activate([
             imageView.widthAnchor.constraint(equalToConstant: imageWidth),
@@ -101,8 +73,8 @@ class IllustratedImageThemeView: ClickHoverImageView {
         ])
         placeholderLabel = placeholder
         highlight(false)
-        onClick = { (event, view) in
-            self.highlight(false)
+        onClick = { [weak self] (event, view) in
+            self?.highlight(false)
         }
     }
 
@@ -111,7 +83,7 @@ class IllustratedImageThemeView: ClickHoverImageView {
     }
 
     private func setBorder() {
-        layer?.cornerRadius = TableGroupView.cornerRadius + 3
+        layer?.cornerRadius = imageCornerRadius + IllustratedImageThemeView.padding
         layer?.borderColor = isFocused ? NSColor.systemAccentColor.cgColor : NSColor.lightGray.cgColor
         layer?.borderWidth = 3
     }
@@ -131,7 +103,7 @@ class IllustratedImageThemeView: ClickHoverImageView {
         if highlighted {
             updateImage(imageName)
         } else {
-            (infoCircle as! NSImageView).image = IllustratedImageThemeView.loadIllustration(self.imageName)
+            (infoCircle as! LocalizedIllustrationView).artwork = Self.artworkName(self.imageName)
         }
     }
 
@@ -143,7 +115,7 @@ class IllustratedImageThemeView: ClickHoverImageView {
     }
 
     private func updateImage(_ imageName: String) {
-        (infoCircle as! NSImageView).image = IllustratedImageThemeView.loadIllustration(getStyleThemeImageName(imageName))
+        (infoCircle as! LocalizedIllustrationView).artwork = Self.artworkName(getStyleThemeImageName(imageName))
     }
 
     static func getConcatenatedImageName(_ style: AppearanceStylePreference,
@@ -303,6 +275,7 @@ class Popover: NSPopover {
     private var searchMatchRanges: ((String, String) -> [Range<Int>])?
     private var currentMessage = ""
     private weak var currentMessageLabel: NSTextField?
+    private var appearanceObservation: NSKeyValueObservation?
 
     override init() {
         super.init()
@@ -353,6 +326,9 @@ class Popover: NSPopover {
         let locationInWindow = event.locationInWindow
         let locationInPositioningView = positioningView.convert(locationInWindow, from: nil)
         let rect = CGRect(origin: locationInPositioningView, size: .zero)
+        appearanceObservation = positioningView.observe(\.effectiveAppearance, options: [.initial, .new]) { [weak self] view, _ in
+            self?.appearance = view.effectiveAppearance
+        }
         show(relativeTo: rect, of: positioningView, preferredEdge: .minX)
     }
 
@@ -372,25 +348,14 @@ class Popover: NSPopover {
             label.attributedStringValue = attributed
             return
         }
-        ranges.compactMap {
-            characterRangeToNSRange($0, in: currentMessage)
-        }.forEach {
-            attributed.addAttribute(.backgroundColor, value: NSColor.systemYellow.withAlphaComponent(0.5), range: $0)
-            attributed.addAttribute(.foregroundColor, value: NSColor(calibratedWhite: 0.12, alpha: 1), range: $0)
-        }
+        SettingsSearchHighlight.applyInlineHighlight(to: attributed, ranges: ranges, in: currentMessage)
         label.attributedStringValue = attributed
-    }
-
-    private func characterRangeToNSRange(_ range: Range<Int>, in text: String) -> NSRange? {
-        if range.lowerBound < 0 || range.upperBound > text.count || range.isEmpty { return nil }
-        let start = text.index(text.startIndex, offsetBy: range.lowerBound)
-        let end = text.index(text.startIndex, offsetBy: range.upperBound)
-        return NSRange(start..<end, in: text)
     }
 }
 
 extension Popover: NSPopoverDelegate {
     func popoverWillClose(_ notification: Notification) {
+        appearanceObservation = nil
         hidingInitiated = true
         currentMessage = ""
         currentMessageLabel = nil
@@ -427,7 +392,7 @@ class AppearanceTab: NSObject {
 
     static func initTab() -> NSView {
         customizeStyleButton = NSButton(title: getCustomizeStyleButtonTitle(), target: self, action: #selector(showCustomizeStyleSheet))
-        animationsButton = NSButton(title: NSLocalizedString("Animations…", comment: ""), target: self, action: #selector(showAnimationsSheet))
+        animationsButton = NSButton(title: NSLocalizedString("Animations", comment: "") + "…", target: self, action: #selector(showAnimationsSheet))
         // Sheets are constructed lazily on first show — see `showCustomizeStyleSheet` /
         // `showAnimationsSheet`. Pre-build search is satisfied by the sheets' static
         // `searchableStrings`, consulted through `SettingsSearchIndex`.
@@ -441,10 +406,7 @@ class AppearanceTab: NSObject {
     }
 
     static func cleanup() {
-        if let observer = proLockObserver {
-            NotificationCenter.default.removeObserver(observer)
-            proLockObserver = nil
-        }
+        NotificationCenter.default.removeObserver(&proLockObserver)
         // Don't call .close() — NSWindow's default `isReleasedWhenClosed = true` interacts
         // badly with our manual nil-out and causes double-release. ARC reclaims the sheet
         // when the static ref is nilled.
@@ -530,17 +492,8 @@ class AppearanceTab: NSObject {
         // `arrow.triangle.branch` rotated 180° — reads as "this value has branches going
         // downward to other shortcuts". Visually distinct from the chain-link unlink button.
         let image = NSImage.fromSymbol(.arrowTriangleBranch, pointSize: 14, rotated180: true)
-        let button = NSButton(image: image, target: self, action: #selector(overrideInfoClicked(_:)))
+        let button = LabelAndControl.makeOverrideSymbolButton(image, target: self, action: #selector(overrideInfoClicked(_:)))
         button.identifier = NSUserInterfaceItemIdentifier(overrideBaseName)
-        button.bezelStyle = .regularSquare
-        button.isBordered = false
-        if #available(macOS 10.14, *) {
-            button.contentTintColor = .controlAccentColor
-        }
-        button.translatesAutoresizingMaskIntoConstraints = false
-        button.widthAnchor.constraint(equalToConstant: 20).isActive = true
-        button.heightAnchor.constraint(equalToConstant: 20).isActive = true
-        button.isHidden = true
         overrideInfoIcons[overrideBaseName] = button
         return button
     }
@@ -610,7 +563,7 @@ class AppearanceTab: NSObject {
                 let stored: ShortcutStylePreference = CachedUserDefaults.macroPref("shortcutStyle", ShortcutStylePreference.allCases)
                 segmented.selectedSegment = stored.index
                 refreshShortcutStyleSegmentAppearance(segmented)
-                UpgradeTab.navigateToUpgradeTab()
+                UpgradeTab.navigateToUpgradeTab(for: .search)
                 return
             }
             original?(c)
@@ -691,7 +644,7 @@ class AppearanceTab: NSObject {
                 // normally runs in the `extraAction`) never executes. Trigger it manually so the
                 // badge and label colors track the reset selection.
                 refreshAutoSegmentAppearance(segmented)
-                UpgradeTab.navigateToUpgradeTab()
+                UpgradeTab.navigateToUpgradeTab(for: .autoSize)
                 return
             }
             original?(control)

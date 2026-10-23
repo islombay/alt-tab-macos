@@ -3,7 +3,6 @@ import ShortcutRecorder
 
 enum LabelPosition {
     case leftWithSeparator
-    case leftWithoutSeparator
     case right
 }
 
@@ -61,15 +60,7 @@ class ClickHoverImageView: MouseHoverView {
 }
 
 class LabelAndControl: NSObject {
-    // periphery:ignore
-    static func makeLabelWithImageRadioButtons(_ labelText: String,
-                                               _ rawName: String,
-                                               _ macroPreferences: [ImageMacroPreference],
-                                               extraAction: ActionClosure? = nil,
-                                               buttonSpacing: CGFloat = 15) -> [NSView] {
-        let view = makeImageRadioButtons(rawName, macroPreferences, extraAction: extraAction, buttonSpacing: buttonSpacing)
-        return [makeLabel(labelText), view]
-    }
+    private static let overrideSymbolButtonSize = CGFloat(20)
 
     static func makeImageRadioButtons(_ rawName: String,
                                       _ macroPreferences: [ImageMacroPreference],
@@ -87,7 +78,7 @@ class LabelAndControl: NSObject {
                     // Snap the radio group back to the stored value and bounce to the upgrade tab.
                     let storedIndex = CachedUserDefaults.intFromMacroPref(rawName, macroPreferences)
                     siblings.enumerated().forEach { (i, b) in b.state = (i == storedIndex) ? .on : .off }
-                    UpgradeTab.navigateToUpgradeTab()
+                    UpgradeTab.navigateToUpgradeTab(for: .styles)
                     return
                 }
                 siblings.enumerated().forEach { (i, otherButtonView) in
@@ -137,13 +128,19 @@ class LabelAndControl: NSObject {
         return button
     }
 
-    // periphery:ignore
-    static func makeCheckbox(_ rawName: String, extraAction: ActionClosure? = nil) -> NSButton {
-        let checkbox = NSButton(checkboxWithTitle: "", target: nil, action: nil)
-        checkbox.translatesAutoresizingMaskIntoConstraints = false
-        checkbox.state = CachedUserDefaults.bool(rawName) ? .on : .off
-        _ = setupControl(checkbox, rawName, extraAction: extraAction)
-        return checkbox
+    /// The small accent-tinted symbol button used by the per-shortcut override affordances: the
+    /// "this value has overrides" branch icon and the "sync with global value" unlink icon. Starts
+    /// hidden, since both only show up on rows that actually have an override.
+    static func makeOverrideSymbolButton(_ image: NSImage, target: AnyObject? = nil, action: Selector? = nil) -> NSButton {
+        let button = NSButton(image: image, target: target, action: action)
+        button.bezelStyle = .regularSquare
+        button.isBordered = false
+        button.contentTintColor = .controlAccentColor
+        button.translatesAutoresizingMaskIntoConstraints = false
+        button.widthAnchor.constraint(equalToConstant: overrideSymbolButtonSize).isActive = true
+        button.heightAnchor.constraint(equalToConstant: overrideSymbolButtonSize).isActive = true
+        button.isHidden = true
+        return button
     }
 
     static func makeInfoButton(size: CGFloat = 16,
@@ -173,42 +170,6 @@ class LabelAndControl: NSObject {
         return view
     }
 
-    // periphery:ignore
-    static func makeLabelWithCheckboxAndInfoButton(_ labelText: String,
-                                                   _ rawName: String,
-                                                   extraAction: ActionClosure? = nil,
-                                                   labelPosition: LabelPosition = .leftWithSeparator,
-                                                   onClick: EventClosure? = nil,
-                                                   onMouseEntered: EventClosure? = nil,
-                                                   onMouseExited: EventClosure? = nil,
-                                                   size: CGFloat = 15) -> [NSView] {
-        let labelCheckboxViews = makeLabelWithCheckbox(labelText, rawName, extraAction: extraAction, labelPosition: labelPosition)
-        let infoButtonView = makeInfoButton(size: size, onClick: onClick, onMouseEntered: onMouseEntered, onMouseExited: onMouseExited)
-        var views: [NSView] = []
-        labelCheckboxViews.forEach { view in
-            views.append(view)
-        }
-        views.append(infoButtonView)
-        let hStack = NSStackView(views: views)
-        hStack.orientation = .horizontal
-        hStack.spacing = 8
-        hStack.alignment = .centerY
-        hStack.translatesAutoresizingMaskIntoConstraints = false
-        return [hStack]
-    }
-
-    // periphery:ignore
-    static func makeTextArea(_ nCharactersWide: CGFloat, _ nLinesHigh: Int, _ placeholder: String, _ rawName: String, extraAction: ActionClosure? = nil) -> [NSView] {
-        let textArea = TextArea(nCharactersWide, nLinesHigh, placeholder)
-        textArea.callback = {
-            controlWasChanged(textArea, nil)
-            extraAction?(textArea)
-        }
-        textArea.identifier = NSUserInterfaceItemIdentifier(rawName)
-        textArea.stringValue = CachedUserDefaults.string(rawName)
-        return [textArea]
-    }
-
     static func dropdown_(_ rawName: String, _ macroPreferences: [MacroPreference]) -> NSPopUpButton {
         let popUp = PopupButtonLikeSystemSettings()
         popUp.addItems(withTitles: macroPreferences.map {
@@ -223,22 +184,6 @@ class LabelAndControl: NSObject {
         SettingsSearchIndex.registerStrings(macroPreferences.map { $0.localizedString })
         SettingsSearchIndex.registerTarget(SettingsWindow.highlightTarget(dropdown))
         return setupControl(dropdown, rawName, extraAction: extraAction) as! NSPopUpButton
-    }
-
-    // periphery:ignore
-    static func makeLabelWithRadioButtons(_ labelText: String,
-                                          _ rawName: String,
-                                          _ values: [MacroPreference],
-                                          extraAction: ActionClosure? = nil,
-                                          buttonSpacing: CGFloat = 30) -> [NSView] {
-        let buttons = makeRadioButtons(rawName, values, extraAction: extraAction)
-        let horizontalStackView = NSStackView(views: buttons)
-        horizontalStackView.translatesAutoresizingMaskIntoConstraints = false
-        horizontalStackView.orientation = .horizontal
-        horizontalStackView.spacing = buttonSpacing
-        horizontalStackView.alignment = .centerY
-        horizontalStackView.translatesAutoresizingMaskIntoConstraints = false
-        return [makeLabel(labelText), horizontalStackView]
     }
 
     static func makeRadioButtons(_ rawName: String, _ macroPreferences: [MacroPreference], extraAction: ActionClosure? = nil) -> [NSButton] {
@@ -261,14 +206,13 @@ class LabelAndControl: NSObject {
         button.translatesAutoresizingMaskIntoConstraints = false
         SettingsSearchIndex.registerStrings(macroPreferences.map { $0.localizedString })
         SettingsSearchIndex.registerTarget(SettingsWindow.highlightTarget(button))
-        applySystemSelectedSegmentStyle(button)
         for (i, preference) in macroPreferences.enumerated() {
             if segmentWidth > 0 {
                 button.setWidth(segmentWidth, forSegment: i)
             }
             var hasImage = false
             if let preference = preference as? SfSymbolMacroPreference {
-                button.setImage(NSImage.fromSymbol(preference.symbol, pointSize: 13), forSegment: i)
+                button.setImage(segmentImage(preference.symbol, preference.localizedString, button, segmentWidth), forSegment: i)
                 hasImage = true
             }
             let selectedSegment = CachedUserDefaults.intFromMacroPref(rawName, macroPreferences)
@@ -283,24 +227,39 @@ class LabelAndControl: NSObject {
             // left+right segment padding plus the symbol image and its gap.
             if segmentWidth > 0 {
                 let label = preference.localizedString
-                let textWidth = (label as NSString).size(withAttributes: [.font: button.font ?? NSFont.systemFont(ofSize: NSFont.systemFontSize)]).width
+                let textWidth = segmentLabelWidth(label, button)
                 let imageWidth: CGFloat = hasImage ? 16 + 4 : 0
                 let availableTextWidth = segmentWidth - 12 - imageWidth
-                if textWidth > availableTextWidth, #available(macOS 10.13, *) {
+                if textWidth > availableTextWidth {
                     button.setToolTip(label, forSegment: i)
                 }
             }
             _ = setupControl(button, rawName, String(i), extraAction: extraAction)
         }
+        if segmentWidth > 0 {
+            button.widthAnchor.constraint(equalToConstant: segmentWidth * CGFloat(macroPreferences.count)).isActive = true
+        }
         return button
     }
 
-    static func applySystemSelectedSegmentStyle(_ control: NSSegmentedControl) {
-        if #available(macOS 10.14, *) {
-            control.segmentStyle = .automatic
-        } else {
-            control.segmentStyle = .texturedRounded
+    /// AppKit draws a segment's image on the leading side of its label, so `spacing.after` goes on the
+    /// image's left in right-to-left layouts. The 0.5pt keeps clear of AppKit's truncation threshold.
+    private static func segmentImage(_ symbol: Symbols, _ label: String, _ control: NSSegmentedControl, _ segmentWidth: CGFloat) -> NSImage {
+        let icon = NSImage.fromSymbol(symbol, pointSize: SegmentSymbol.pointSize, margin: SegmentSymbol.margin)
+        let glyphWidth = icon.size.width - 2 * SegmentSymbol.margin
+        let availableWidth = segmentWidth > 0 ? segmentWidth - 0.5 : .greatestFiniteMagnitude
+        let spacing = SegmentSymbol.spacing(glyphWidth: glyphWidth, labelWidth: segmentLabelWidth(label, control), availableWidth: availableWidth)
+        let x = (control.userInterfaceLayoutDirection == .rightToLeft ? spacing.after : spacing.before) - SegmentSymbol.margin
+        let image = NSImage(size: NSSize(width: spacing.before + glyphWidth + spacing.after, height: icon.size.height), flipped: false) { _ in
+            icon.draw(at: NSPoint(x: x, y: 0), from: .zero, operation: .sourceOver, fraction: 1)
+            return true
         }
+        image.isTemplate = true
+        return image
+    }
+
+    private static func segmentLabelWidth(_ label: String, _ control: NSSegmentedControl) -> CGFloat {
+        return (label as NSString).size(withAttributes: [.font: control.font ?? NSFont.systemFont(ofSize: NSFont.systemFontSize)]).width
     }
 
     static func makeLabelWithSlider(_ labelText: String, _ rawName: String, _ minValue: Double, _ maxValue: Double,
@@ -406,12 +365,6 @@ class LabelAndControl: NSObject {
                 return ((control as! NSButton).state == NSButton.StateValue.on) ? controlId : nil
             } else {
                 return String((control as! NSButton).state == NSButton.StateValue.on)
-            }
-        } else if control is Switch {
-            if let controlId {
-                return ((control as! Switch).state == NSButton.StateValue.on) ? controlId : nil
-            } else {
-                return String((control as! Switch).state == NSButton.StateValue.on)
             }
         } else if control is NSSegmentedControl {
             return String((control as! NSSegmentedControl).selectedSegment)

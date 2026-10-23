@@ -1,8 +1,18 @@
 import Foundation
 
 class LicenseManager {
-    static let keychainService = "\(App.bundleIdentifier).license"
-    static let defaultsSuiteName = "\(App.bundleIdentifier).license"
+    static var keychainService: String {
+        #if DEBUG
+        if QaLifecycleEnvironment.enabled { return QaLifecycleEnvironment.namespace }
+        #endif
+        return "\(App.bundleIdentifier).license"
+    }
+    static var defaultsSuiteName: String {
+        #if DEBUG
+        if QaLifecycleEnvironment.enabled { return QaLifecycleEnvironment.namespace }
+        #endif
+        return "\(App.bundleIdentifier).license"
+    }
 
     static let shared: LicenseManager = {
         let keychain = SystemKeychain(service: keychainService)
@@ -48,30 +58,58 @@ class LicenseManager {
     /// can drive activation without side effects.
     var onBeforeProUnlock: () -> Void = { }
 
-    private(set) var state: LicenseState = .trialExpired {
+    private var appIsUsable = false
+
+    private(set) var state: LicenseState = .trialNotStarted {
         didSet { onStateChanged?(state) }
     }
 
-    var customerEmail: String? { defaults.string(forKey: Self.customerEmailKey) }
+    #if DEBUG
+    private var hasMockedLicense = false
+    private var mockedTrialStartDate: Date?
+    private var mockedCustomerEmail: String?
+    private var mockedVariant: String?
+    #endif
+
+    var customerEmail: String? {
+        #if DEBUG
+        if hasMockedLicense { return mockedCustomerEmail }
+        #endif
+        return defaults.string(forKey: Self.customerEmailKey)
+    }
 
     var isLifetimeVariant: Bool {
+        #if DEBUG
+        if hasMockedLicense { return mockedVariant.map(Self.lifetimeVariants.contains) ?? false }
+        #endif
         guard let variant = keychain.value(account: Self.keychainVariantAccount) else { return false }
         return Self.lifetimeVariants.contains(variant)
     }
 
     var isProAvailable: Bool { state.isProAvailable }
 
+    var isMocked: Bool {
+        #if DEBUG
+        return hasMockedLicense
+        #else
+        return false
+        #endif
+    }
+
     /// Pro features are locked out as soon as the license is no longer valid. Degradable Pro
     /// preferences are downgraded to their Free equivalents immediately via
     /// `ProTransitionManager.onProLockEngaged()`, wired to the state-change hook in App.swift.
     var isProLocked: Bool {
         switch state {
-        case .pro, .trial: return false
+        case .trialNotStarted, .pro, .trial: return false
         case .proExpired, .trialExpired: return true
         }
     }
 
     var trialStartDate: Date? {
+        #if DEBUG
+        if hasMockedLicense { return mockedTrialStartDate }
+        #endif
         guard defaults.object(forKey: "trialStartDate") != nil else { return nil }
         return Date(timeIntervalSince1970: defaults.double(forKey: "trialStartDate"))
     }
@@ -79,6 +117,24 @@ class LicenseManager {
     var daysSinceTrialStart: Int {
         guard let start = trialStartDate else { return 0 }
         return Int(clock.now.timeIntervalSince(start) / 86400)
+    }
+
+    /// 1-indexed, like the "Day N" of `ProTransitionSpecs.md`. Nil when no trial ever started, or when the clock
+    /// is set before the trial start, rather than a made-up day.
+    var trialDay: Int? {
+        guard let start = trialStartDate, clock.now >= start else { return nil }
+        return daysSinceTrialStart + 1
+    }
+
+    var trialEndDate: Date? {
+        trialStartDate?.addingTimeInterval(Double(Self.trialDuration) * 86400)
+    }
+
+    /// `state` only follows the clock when something calls `refreshState()`, so an app left running keeps a
+    /// `.trial` state past the trial's end. Cheap: no Keychain read.
+    var trialEndedSinceLastRefresh: Bool {
+        guard case .trial = state, let trialEndDate else { return false }
+        return clock.now >= trialEndDate
     }
 
     init(clock: Clock, keychain: Keychain, api: LicenseAPI, defaults: UserDefaults) {
@@ -101,6 +157,23 @@ class LicenseManager {
         if newState != state { state = newState }
     }
 
+    /// Called after the switcher and input handlers exist, with the permission gate still satisfied.
+    /// Reads and refreshes never start a trial; a saved start is immutable even after revocation or expiry.
+    func onAppBecameUsable(accessibility: PermissionStatus, screenRecording: PermissionStatus) {
+        guard PermissionFlow.isComplete(accessibility: accessibility, screenRecording: screenRecording) else { return }
+        appIsUsable = true
+        startTrialIfNeeded()
+    }
+
+    private func startTrialIfNeeded() {
+        guard appIsUsable, !isMocked, defaults.object(forKey: "trialStartDate") == nil,
+              keychain.value(account: Self.keychainKeyAccount) == nil else { return }
+        defaults.set(clock.now.timeIntervalSince1970, forKey: "trialStartDate")
+        refreshState()
+    }
+
+    var onActivationSucceeded: () -> Void = {}
+
     func activate(_ licenseKey: String, completion: @escaping (Result<Void, Error>) -> Void) {
         api.activate(licenseKey) { [weak self] result in
             DispatchQueue.main.async {
@@ -114,15 +187,18 @@ class LicenseManager {
                     if let variantId = response.variantId {
                         writes.append((Self.keychainVariantAccount, variantId))
                     }
-                    var attempted: [String] = []
+                    var written: [String] = []
                     for (account, value) in writes {
                         let status = self.keychain.setValue(value, account: account)
-                        attempted.append(account)
                         if status != errSecSuccess {
-                            attempted.forEach { self.keychain.remove(account: $0) }
+                            // Only roll back what this activation actually wrote. A failed write left the
+                            // previous value in place, so removing that account would delete a license we
+                            // never wrote, which is the exact loss `setValue` avoids by not deleting.
+                            written.forEach { self.keychain.remove(account: $0) }
                             completion(.failure(LicenseAPIError.keychainWriteFailed(account: account, status: status)))
                             return
                         }
+                        written.append(account)
                     }
                     self.defaults.set(self.clock.now.timeIntervalSince1970, forKey: "lastValidation")
                     self.defaults.set(true, forKey: "lastValidationResult")
@@ -130,7 +206,9 @@ class LicenseManager {
                         self.defaults.set(email, forKey: Self.customerEmailKey)
                     }
                     self.onBeforeProUnlock()
+                    let newlyActivated = self.state != .pro
                     self.state = .pro
+                    if newlyActivated { self.onActivationSucceeded() }
                     completion(.success(()))
                 case .failure(let error):
                     completion(.failure(error))
@@ -156,7 +234,8 @@ class LicenseManager {
                     self.defaults.removeObject(forKey: "lastValidation")
                     self.defaults.removeObject(forKey: "lastValidationResult")
                     self.defaults.removeObject(forKey: Self.customerEmailKey)
-                    self.state = self.computeTrialState()
+                    self.startTrialIfNeeded()
+                    self.refreshState()
                     completion(.success(()))
                 case .failure(let error):
                     completion(.failure(error))
@@ -176,10 +255,11 @@ class LicenseManager {
     func computeState() -> LicenseState { .pro }
 
     private func computeTrialState() -> LicenseState {
-        if defaults.object(forKey: "trialStartDate") == nil {
-            defaults.set(clock.now.timeIntervalSince1970, forKey: "trialStartDate")
-        }
-        let trialStart = Date(timeIntervalSince1970: defaults.double(forKey: "trialStartDate"))
+        guard let start = trialStartDate else { return .trialNotStarted }
+        return trialState(start)
+    }
+
+    private func trialState(_ trialStart: Date) -> LicenseState {
         let daysSinceTrialStart = Int(clock.now.timeIntervalSince(trialStart) / (24 * 60 * 60))
         guard daysSinceTrialStart < Self.trialDuration else { return .trialExpired }
         return .trial(daysRemaining: Self.trialDuration - daysSinceTrialStart)
@@ -213,47 +293,21 @@ class LicenseManager {
     }
 
     #if DEBUG
-    func mockTrialUser() {
-        keychain.remove(account: Self.keychainKeyAccount)
-        keychain.remove(account: Self.keychainInstanceAccount)
-        keychain.remove(account: Self.keychainVariantAccount)
-        defaults.set(clock.now.timeIntervalSince1970, forKey: "trialStartDate")
-        defaults.removeObject(forKey: "lastValidation")
-        defaults.removeObject(forKey: "lastValidationResult")
-        defaults.removeObject(forKey: Self.customerEmailKey)
-        state = .trial(daysRemaining: Self.trialDuration)
-    }
-
-    func mockTrialExpired() {
-        keychain.remove(account: Self.keychainKeyAccount)
-        keychain.remove(account: Self.keychainInstanceAccount)
-        keychain.remove(account: Self.keychainVariantAccount)
-        defaults.removeObject(forKey: "trialStartDate")
-        defaults.removeObject(forKey: "lastValidation")
-        defaults.removeObject(forKey: "lastValidationResult")
-        defaults.removeObject(forKey: Self.customerEmailKey)
-        state = .trialExpired
-    }
-
+    /// `day` is 1-based: day 1 is the day the trial started. The mocked trial then follows `clock` on
+    /// `refreshState()`, like a real one.
     func mockTrialDay(_ day: Int) {
-        keychain.remove(account: Self.keychainKeyAccount)
-        keychain.remove(account: Self.keychainInstanceAccount)
-        keychain.remove(account: Self.keychainVariantAccount)
-        let trialStart = clock.now.addingTimeInterval(-Double(day - 1) * 86400)
-        defaults.set(trialStart.timeIntervalSince1970, forKey: "trialStartDate")
-        defaults.removeObject(forKey: "lastValidation")
-        defaults.removeObject(forKey: "lastValidationResult")
-        defaults.removeObject(forKey: Self.customerEmailKey)
-        let daysRemaining = Self.trialDuration - (day - 1)
-        state = daysRemaining > 0 ? .trial(daysRemaining: daysRemaining) : .trialExpired
+        hasMockedLicense = true
+        mockedTrialStartDate = clock.now.addingTimeInterval(-Double(day - 1) * 86400)
+        mockedCustomerEmail = nil
+        mockedVariant = nil
+        state = trialState(mockedTrialStartDate!)
     }
 
     func mockProUser() {
-        keychain.setValue("MOCK-PRO-LICENSE-KEY", account: Self.keychainKeyAccount)
-        keychain.setValue("mock-instance-id", account: Self.keychainInstanceAccount)
-        defaults.set(clock.now.timeIntervalSince1970, forKey: "lastValidation")
-        defaults.set(true, forKey: "lastValidationResult")
-        defaults.set("john@cool-software.com", forKey: Self.customerEmailKey)
+        hasMockedLicense = true
+        mockedTrialStartDate = nil
+        mockedCustomerEmail = "john@cool-software.com"
+        mockedVariant = "pro"
         onBeforeProUnlock()
         state = .pro
     }

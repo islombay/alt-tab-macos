@@ -12,7 +12,9 @@ class TileOverView: FlippedView {
 
     var windowControlButtons: [TrafficLightButton] { [quitButton, closeButton, minimizeButton, maximizeButton] }
 
+    // periphery:ignore - AppKit private overrides, found by the ObjC runtime rather than called
     @objc func _windowChangedKeyState() {}
+    // periphery:ignore - AppKit private overrides, found by the ObjC runtime rather than called
     @objc func _layoutSubtreeWithOldSize(_ oldSize: NSSize) {}
 
     convenience init() {
@@ -42,7 +44,7 @@ class TileOverView: FlippedView {
         guard let scrollView, !scrollView.isCurrentlyScrolling, !TilesView.hasMarkedText(), !ContextMenuEvents.isMenuOpen else { return }
         let location = convert(TilesPanel.shared.mouseLocationOutsideOfEventStream, from: nil)
         updateButtonHover(location)
-        let newTarget = findTarget(location)
+        let newTarget = SearchDiscoveryHint.shared.containsMouseLocation ? nil : findTarget(location)
         if let target = newTarget ?? previousTarget {
             let statusFrame = target.convert(target.statusIcons.frame, to: superview)
             if statusFrame.contains(location) {
@@ -88,11 +90,11 @@ class TileOverView: FlippedView {
         guard newHoveredButton !== previousHoveredButton else { return }
         if let old = previousHoveredButton {
             old.isMouseOver = false
-            old.setNeedsDisplay()
+            old.needsDisplay = true
         }
         if let new = newHoveredButton {
             new.isMouseOver = true
-            new.setNeedsDisplay()
+            new.needsDisplay = true
         }
         previousHoveredButton = newHoveredButton
     }
@@ -111,6 +113,7 @@ class TileOverView: FlippedView {
 
     func resetHoveredWindow() {
         previousTarget = nil
+        SwitcherSession.current?.hoveredTarget = nil
         if let oldIndex = SwitcherSession.current?.hoveredIndex {
             SwitcherSession.current?.hoveredIndex = nil
             TilesView.highlight(oldIndex)
